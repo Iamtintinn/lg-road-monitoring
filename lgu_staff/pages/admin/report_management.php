@@ -1334,6 +1334,9 @@ function rm_render_lgu_panel_tbody(
                                     <button type="button" class="rm-edit-btn" onclick="viewReportUpdates(<?php echo (int)$report['id']; ?>, '<?php echo $rtype; ?>', 'lgu', 'cancelled')" title="Progress Updates">
                                         <i class="fas fa-timeline"></i>
                                     </button>
+                                    <button type="button" class="rm-edit-btn" onclick="reopenReport(<?php echo (int)$report['id']; ?>, '<?php echo $lgu_delete_table === 'road_maintenance_reports' ? 'maintenance' : 'transport'; ?>', '<?php echo $lgu_delete_table; ?>')" title="Reopen Project">
+                                        <i class="fas fa-rotate-right"></i>
+                                    </button>
                                     <?php elseif ($can_assign): ?>
                                     <button type="button" class="rm-edit-btn" onclick="assignReport(<?php echo (int)$report['id']; ?>, '<?php echo $rtype; ?>', 'road_transportation_reports')" title="Assign">
                                         <i class="fas fa-user-plus"></i>
@@ -1532,6 +1535,9 @@ function rm_render_citizen_panel_tbody(
                                     <button type="button" class="rm-edit-btn" onclick="viewReportUpdates(<?php echo (int)$report['id']; ?>, '<?php echo $rtype; ?>', 'citizen', 'cancelled')" title="Progress Updates">
                                         <i class="fas fa-timeline"></i>
                                     </button>
+                                    <button type="button" class="rm-edit-btn" onclick="reopenReport(<?php echo (int)$report['id']; ?>, 'transport', 'road_transportation_reports')" title="Reopen Project">
+                                        <i class="fas fa-rotate-right"></i>
+                                    </button>
                                     <?php elseif ($can_assign): ?>
                                     <button type="button" class="rm-edit-btn" onclick="assignReport(<?php echo (int)$report['id']; ?>, '<?php echo $rtype; ?>', 'road_transportation_reports')" title="Assign">
                                         <i class="fas fa-user-plus"></i>
@@ -1705,6 +1711,9 @@ function rm_render_cimm_panel_tbody(array $reports): string {
                                     <?php if ($is_restored_cancelled): ?>
                                     <button type="button" class="rm-edit-btn" onclick="viewReportUpdates(<?php echo (int)$row['id']; ?>, '<?php echo $cimm_rtype; ?>', 'cimm', 'cancelled')" title="Progress Updates">
                                         <i class="fas fa-timeline"></i>
+                                    </button>
+                                    <button type="button" class="rm-edit-btn" onclick="reopenReport(<?php echo (int)$row['id']; ?>, 'cimm', 'cimm_verification_reports')" title="Reopen Project">
+                                        <i class="fas fa-rotate-right"></i>
                                     </button>
                                     <?php elseif ($can_assign): ?>
                                     <button type="button" class="rm-edit-btn" onclick="assignCimmReport(<?php echo $cimmIdx; ?>)" title="Assign">
@@ -6643,6 +6652,9 @@ if ($focus_id > 0) {
                                     <button type="button" class="rm-edit-btn" onclick="viewReportUpdates(<?php echo (int)$report['id']; ?>, '<?php echo $infra_rtype; ?>', 'ipms', 'cancelled')" title="Progress Updates">
                                         <i class="fas fa-timeline"></i>
                                     </button>
+                                    <button type="button" class="rm-edit-btn" onclick="reopenReport(<?php echo (int)$report['id']; ?>, 'ipms', 'ipms_road_projects')" title="Reopen Project">
+                                        <i class="fas fa-rotate-right"></i>
+                                    </button>
                                     <?php elseif (!empty($report['from_ipms']) && $infra_can_assign): ?>
                                     <button type="button" class="rm-edit-btn" onclick="assignIpmsProject(<?php echo (int)$report['id']; ?>)" title="Assign">
                                         <i class="fas fa-user-plus"></i>
@@ -7152,6 +7164,33 @@ if ($focus_id > 0) {
                     </button>
                     <button class="btn-secondary-custom" onclick="closeModalAndRefresh('updatesModal')">Close</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cancel Project (reason + photos) -->
+    <div id="cancelProjectModal" class="modal">
+        <div class="modal-content" style="max-width: 560px;">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-ban"></i> Cancel Project</h5>
+                <button type="button" class="close" onclick="closeModal('cancelProjectModal')" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="t-text-secondary" style="margin-bottom:14px;">Please provide a reason for cancelling this project. The reason and any photos will be saved to the project's Updates.</p>
+                <div class="form-group">
+                    <label for="cancelProjectReason" style="display:block;font-weight:600;margin-bottom:6px;">Cancellation Reason <span style="color:#dc3545;">*</span></label>
+                    <textarea id="cancelProjectReason" rows="4" placeholder="State the reason for cancelling this project..." style="width:100%;resize:vertical;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-family:inherit;font-size:13px;"></textarea>
+                </div>
+                <div class="form-group" style="margin-top:12px;">
+                    <label for="cancelProjectPhotos" style="display:block;font-weight:600;margin-bottom:6px;">Photos (optional)</label>
+                    <input type="file" id="cancelProjectPhotos" accept="image/jpeg,image/png,image/gif,image/webp" multiple>
+                    <small class="t-text-secondary" style="font-size:11px;display:block;margin-top:4px;">Accepted: JPG, PNG, GIF, WebP</small>
+                    <div id="cancelProjectPreviews" class="file-previews" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"></div>
+                </div>
+            </div>
+            <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:8px;">
+                <button type="button" class="btn-secondary-custom" onclick="closeModal('cancelProjectModal')"><i class="fas fa-times"></i> Close</button>
+                <button type="button" class="btn-danger-custom" id="cancelProjectSubmitBtn" onclick="confirmCancelReport()"><i class="fas fa-ban"></i> Confirm Cancel</button>
             </div>
         </div>
     </div>
@@ -8470,6 +8509,35 @@ if ($focus_id > 0) {
             checkUpdatePermission();
         }
 
+        function reopenReport(id, source, reportTable) {
+            if (!id) return;
+            if (!confirm('Reopen this cancelled project and return it to In Progress? All existing details, updates and assignments will be kept.')) {
+                return;
+            }
+            var formData = new FormData();
+            formData.append('action', 'reopen_report');
+            formData.append('report_id', id);
+            formData.append('source', source || '');
+            formData.append('report_table', reportTable || '');
+            fetch('../api/progress_update_api.php', {
+                method: 'POST',
+                body: formData
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data && data.success) {
+                    showNotification(data.message || 'Project reopened', 'success');
+                    setTimeout(function() { location.reload(); }, 600);
+                } else {
+                    showNotification((data && data.message) || 'Failed to reopen project', 'error');
+                }
+            })
+            .catch(function(e) {
+                showNotification('Network error', 'error');
+                console.error(e);
+            });
+        }
+
         function checkUpdatePermission() {
             // Server-authoritative check (role + assignment): Road/Transportation
             // Monitoring Officers can only post updates to reports assigned to
@@ -8795,7 +8863,30 @@ if ($focus_id > 0) {
 
         function cancelReport() {
             if (!currentUpdatesReportId) return;
-            
+            // Ask for a cancellation reason (+ optional photos) before cancelling.
+            var reasonEl = document.getElementById('cancelProjectReason');
+            if (reasonEl) reasonEl.value = '';
+            var photosEl = document.getElementById('cancelProjectPhotos');
+            if (photosEl) photosEl.value = '';
+            var previews = document.getElementById('cancelProjectPreviews');
+            if (previews) previews.innerHTML = '';
+            openModal('cancelProjectModal');
+        }
+
+        function confirmCancelReport() {
+            if (!currentUpdatesReportId) return;
+
+            var reasonEl = document.getElementById('cancelProjectReason');
+            var reason = reasonEl ? reasonEl.value.trim() : '';
+            if (!reason) {
+                showNotification('A cancellation reason is required.', 'error');
+                if (reasonEl) reasonEl.focus();
+                return;
+            }
+
+            var photosEl = document.getElementById('cancelProjectPhotos');
+            var files = photosEl && photosEl.files ? Array.from(photosEl.files) : [];
+
             var newStatus = (currentUpdatesReportSource === 'cimm') ? 'Cancelled' : 'cancelled';
             var formData = new FormData();
             // Cancel MOVES the report into the archive as 'cancelled' and
@@ -8807,6 +8898,17 @@ if ($focus_id > 0) {
             formData.append('report_type', currentUpdatesReportType);
             formData.append('status', newStatus);
             formData.append('source', currentUpdatesReportSource);
+            formData.append('cancel_reason', reason);
+            files.forEach(function(file) {
+                formData.append('cancel_media[]', file);
+            });
+
+            var submitBtn = document.getElementById('cancelProjectSubmitBtn');
+            var orig = submitBtn ? submitBtn.innerHTML : '';
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Cancelling...';
+            }
 
             fetch('../api/progress_update_api.php', {
                 method: 'POST',
@@ -8816,6 +8918,7 @@ if ($focus_id > 0) {
             .then(function(data) {
                 if (data.success) {
                     showNotification(data.message, 'success');
+                    closeModal('cancelProjectModal');
                     closeModal('updatesModal');
                     location.reload();
                 } else {
@@ -8825,8 +8928,55 @@ if ($focus_id > 0) {
             .catch(function(e) {
                 showNotification('Network error', 'error');
                 console.error(e);
+            })
+            .finally(function() {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = orig;
+                }
             });
         }
+
+        // Photo preview for the cancel modal. Removal rebuilds the input's
+        // FileList so the previews match exactly what will be uploaded.
+        function renderCancelProjectPreviews() {
+            var input = document.getElementById('cancelProjectPhotos');
+            var preview = document.getElementById('cancelProjectPreviews');
+            if (!input || !preview) return;
+            preview.innerHTML = '';
+            Array.from(input.files || []).forEach(function(f, index) {
+                if (!f.type || f.type.indexOf('image/') !== 0) return;
+                var reader = new FileReader();
+                reader.onload = function(ev) {
+                    var item = document.createElement('div');
+                    item.className = 'file-preview-item';
+                    item.style.cssText = 'position:relative;width:80px;height:60px;border-radius:6px;overflow:hidden;border:1px solid rgba(55,98,200,0.15);';
+                    item.innerHTML = '<img src="' + ev.target.result + '" style="width:100%;height:100%;object-fit:cover;">';
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'remove-preview';
+                    btn.innerHTML = '&times;';
+                    btn.style.cssText = 'position:absolute;top:2px;right:2px;border:none;background:rgba(0,0,0,0.55);color:#fff;border-radius:50%;width:18px;height:18px;line-height:1;cursor:pointer;';
+                    btn.addEventListener('click', function() {
+                        var dt = new DataTransfer();
+                        Array.from(input.files || []).forEach(function(file, i) {
+                            if (i !== index) dt.items.add(file);
+                        });
+                        input.files = dt.files;
+                        renderCancelProjectPreviews();
+                    });
+                    item.appendChild(btn);
+                    preview.appendChild(item);
+                };
+                reader.readAsDataURL(f);
+            });
+        }
+
+        document.addEventListener('change', function(e) {
+            if (e.target && e.target.id === 'cancelProjectPhotos') {
+                renderCancelProjectPreviews();
+            }
+        });
 
         function closeModalAndRefresh(modalId) {
             closeModal(modalId);

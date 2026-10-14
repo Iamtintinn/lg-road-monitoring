@@ -7675,6 +7675,47 @@ if ($is_completed_projects_view || $is_system_admin) {
             }
         });
 
+        // Photo preview for the cancellation confirm modal. Removal rebuilds the
+        // input's FileList so what is shown is exactly what gets uploaded.
+        function renderCancelPhotoPreviews() {
+            var input = document.getElementById('statusConfirmCancelPhotos');
+            var preview = document.getElementById('statusConfirmCancelPreviews');
+            if (!input || !preview) return;
+            preview.innerHTML = '';
+            Array.from(input.files || []).forEach(function(f, index) {
+                if (!f.type || f.type.indexOf('image/') !== 0) return;
+                var reader = new FileReader();
+                reader.onload = function(ev) {
+                    var item = document.createElement('div');
+                    item.className = 'file-preview-item';
+                    item.style.cssText = 'position:relative;width:80px;height:60px;border-radius:6px;overflow:hidden;border:1px solid rgba(55,98,200,0.15);';
+                    item.innerHTML = '<img src="' + ev.target.result + '" style="width:100%;height:100%;object-fit:cover;">';
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'remove-preview';
+                    btn.innerHTML = '&times;';
+                    btn.style.cssText = 'position:absolute;top:2px;right:2px;border:none;background:rgba(0,0,0,0.55);color:#fff;border-radius:50%;width:18px;height:18px;line-height:1;cursor:pointer;';
+                    btn.addEventListener('click', function() {
+                        var dt = new DataTransfer();
+                        Array.from(input.files || []).forEach(function(file, i) {
+                            if (i !== index) dt.items.add(file);
+                        });
+                        input.files = dt.files;
+                        renderCancelPhotoPreviews();
+                    });
+                    item.appendChild(btn);
+                    preview.appendChild(item);
+                };
+                reader.readAsDataURL(f);
+            });
+        }
+
+        document.addEventListener('change', function(e) {
+            if (e.target && e.target.id === 'statusConfirmCancelPhotos') {
+                renderCancelPhotoPreviews();
+            }
+        });
+
         // Complete button handler
         document.addEventListener('click', function(e) {
             if (e.target && e.target.closest && e.target.closest('#completeBtn')) {
@@ -7730,7 +7771,13 @@ if ($is_completed_projects_view || $is_system_admin) {
             if (!currentUpdatesReportId) return;
 
             if (isOfficerRole()) {
-                submitReviewRequest(action === 'complete' ? 'completion' : 'cancellation');
+                if (action === 'cancel') {
+                    // Officers collect a required reason (+ optional photos)
+                    // before the cancellation request is submitted.
+                    openRequestCancelModal();
+                } else {
+                    submitReviewRequest('completion');
+                }
                 return;
             }
 
@@ -7743,27 +7790,62 @@ if ($is_completed_projects_view || $is_system_admin) {
             openStatusConfirmModal(action);
         }
 
+        /**
+         * Officer "Request Cancellation" modal. Reuses the confirmation modal to
+         * collect a required reason and optional photos; the request is only sent
+         * when the officer clicks Submit Request, never on the first click.
+         */
+        function openRequestCancelModal() {
+            pendingStatusAction = 'request_cancel';
+            var titleEl = document.getElementById('statusConfirmTitle');
+            var msgEl = document.getElementById('statusConfirmMessage');
+            var iconEl = document.getElementById('statusConfirmIcon');
+            var confirmBtn = document.getElementById('statusConfirmSubmitBtn');
+            var cancelFields = document.getElementById('statusConfirmCancelFields');
+            var closeLabel = document.getElementById('statusConfirmCloseLabel');
+            if (titleEl) titleEl.textContent = 'Request Cancellation';
+            if (msgEl) msgEl.textContent = 'Provide a reason for requesting cancellation. This will be sent to the admin or supervisor who assigned this project for review and approval.';
+            if (iconEl) iconEl.innerHTML = '<i class="fas fa-ban"></i>';
+            resetCancelConfirmFields();
+            if (cancelFields) cancelFields.style.display = 'block';
+            if (closeLabel) closeLabel.textContent = 'Close';
+            if (confirmBtn) {
+                confirmBtn.className = 'btn-danger-custom';
+                confirmBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Request';
+            }
+            var modal = document.getElementById('statusConfirmModal');
+            if (modal) modal.style.display = 'block';
+            document.body.style.overflow = 'hidden';
+        }
+
         function openStatusConfirmModal(action) {
             pendingStatusAction = action === 'cancel' ? 'cancel' : 'complete';
             var titleEl = document.getElementById('statusConfirmTitle');
             var msgEl = document.getElementById('statusConfirmMessage');
             var iconEl = document.getElementById('statusConfirmIcon');
             var confirmBtn = document.getElementById('statusConfirmSubmitBtn');
+            var cancelFields = document.getElementById('statusConfirmCancelFields');
+            var closeLabel = document.getElementById('statusConfirmCloseLabel');
             if (pendingStatusAction === 'complete') {
                 if (titleEl) titleEl.textContent = 'Confirm Completion';
                 if (msgEl) msgEl.textContent = 'Are you sure you want to mark this project as completed?';
                 if (iconEl) iconEl.innerHTML = '<i class="fas fa-circle-check"></i>';
+                if (cancelFields) cancelFields.style.display = 'none';
+                if (closeLabel) closeLabel.textContent = 'Go Back';
                 if (confirmBtn) {
                     confirmBtn.className = 'btn-success-custom';
                     confirmBtn.innerHTML = '<i class="fas fa-check"></i> Confirm';
                 }
             } else {
-                if (titleEl) titleEl.textContent = 'Confirm Cancellation';
-                if (msgEl) msgEl.textContent = 'Are you sure you want to cancel this project?';
+                if (titleEl) titleEl.textContent = 'Cancel Project';
+                if (msgEl) msgEl.textContent = 'Please provide a reason for cancelling this project.';
                 if (iconEl) iconEl.innerHTML = '<i class="fas fa-ban"></i>';
+                resetCancelConfirmFields();
+                if (cancelFields) cancelFields.style.display = 'block';
+                if (closeLabel) closeLabel.textContent = 'Close';
                 if (confirmBtn) {
                     confirmBtn.className = 'btn-danger-custom';
-                    confirmBtn.innerHTML = '<i class="fas fa-check"></i> Confirm';
+                    confirmBtn.innerHTML = '<i class="fas fa-ban"></i> Confirm Cancel';
                 }
             }
             var modal = document.getElementById('statusConfirmModal');
@@ -7771,8 +7853,18 @@ if ($is_completed_projects_view || $is_system_admin) {
             document.body.style.overflow = 'hidden';
         }
 
+        function resetCancelConfirmFields() {
+            var reasonEl = document.getElementById('statusConfirmCancelReason');
+            if (reasonEl) reasonEl.value = '';
+            var photosEl = document.getElementById('statusConfirmCancelPhotos');
+            if (photosEl) photosEl.value = '';
+            var previews = document.getElementById('statusConfirmCancelPreviews');
+            if (previews) previews.innerHTML = '';
+        }
+
         function closeStatusConfirmModal() {
             pendingStatusAction = null;
+            resetCancelConfirmFields();
             var modal = document.getElementById('statusConfirmModal');
             if (modal) modal.style.display = 'none';
             var updates = document.getElementById('updatesModal');
@@ -7783,11 +7875,27 @@ if ($is_completed_projects_view || $is_system_admin) {
 
         function confirmStatusAction() {
             var action = pendingStatusAction;
+            if (action === 'cancel' || action === 'request_cancel') {
+                var reasonEl = document.getElementById('statusConfirmCancelReason');
+                var reason = reasonEl ? reasonEl.value.trim() : '';
+                if (!reason) {
+                    showNotification('A cancellation reason is required.', 'error');
+                    if (reasonEl) reasonEl.focus();
+                    return;
+                }
+                var photosEl = document.getElementById('statusConfirmCancelPhotos');
+                var files = photosEl && photosEl.files ? Array.from(photosEl.files) : [];
+                closeStatusConfirmModal();
+                if (action === 'request_cancel') {
+                    submitReviewRequest('cancellation', reason, files);
+                } else {
+                    executeCancelReport(reason, files);
+                }
+                return;
+            }
             closeStatusConfirmModal();
             if (action === 'complete') {
                 executeCompleteReport();
-            } else if (action === 'cancel') {
-                executeCancelReport();
             }
         }
 
@@ -7930,8 +8038,12 @@ if ($is_completed_projects_view || $is_system_admin) {
             });
         }
 
-        function executeCancelReport() {
+        function executeCancelReport(cancelReason, cancelFiles) {
             if (!currentUpdatesReportId) return;
+            if (!cancelReason || !String(cancelReason).trim()) {
+                showNotification('A cancellation reason is required.', 'error');
+                return;
+            }
             
             var newStatus = (currentUpdatesReportSource === 'cimm') ? 'Cancelled' : 'cancelled';
             var formData = new FormData();
@@ -7940,6 +8052,10 @@ if ($is_completed_projects_view || $is_system_admin) {
             formData.append('report_type', currentUpdatesReportType);
             formData.append('status', newStatus);
             formData.append('source', currentUpdatesReportSource);
+            formData.append('cancel_reason', String(cancelReason).trim());
+            (cancelFiles || []).forEach(function(file) {
+                formData.append('cancel_media[]', file);
+            });
 
             fetch('../api/progress_update_api.php', {
                 method: 'POST',
@@ -7968,7 +8084,7 @@ if ($is_completed_projects_view || $is_system_admin) {
         // Submit a completion/cancellation request (officers only). The backend
         // validates role + project category, notifies the matching supervisor,
         // and leaves the report status and archive untouched.
-        function submitReviewRequest(requestType) {
+        function submitReviewRequest(requestType, requestReason, requestFiles) {
             if (!currentUpdatesReportId) return;
             var btn = (requestType === 'completion') ? document.getElementById('completeBtn') : document.getElementById('cancelBtn');
             if (btn) btn.disabled = true;
@@ -7981,6 +8097,10 @@ if ($is_completed_projects_view || $is_system_admin) {
             fd.append('report_type', currentUpdatesReportType);
             fd.append('request_type', requestType);
             fd.append('source', currentUpdatesReportSource);
+            if (requestReason) fd.append('reason', String(requestReason).trim());
+            (requestFiles || []).forEach(function(file) {
+                fd.append('request_media[]', file);
+            });
 
             fetch('../api/progress_update_api.php', {
                 method: 'POST',
@@ -7993,6 +8113,11 @@ if ($is_completed_projects_view || $is_system_admin) {
                     if (btn) {
                         btn.disabled = true;
                         btn.innerHTML = (requestType === 'completion') ? 'Request Submitted' : 'Request Submitted';
+                    }
+                    // Refresh the Updates timeline so the newly recorded request
+                    // reason (+ photos) appears immediately.
+                    if (requestReason && typeof loadUpdates === 'function') {
+                        loadUpdates(currentUpdatesReportId, currentUpdatesReportType);
                     }
                 } else {
                     showNotification(data.message || 'Failed to submit request', 'error');
@@ -10183,10 +10308,22 @@ if ($is_completed_projects_view || $is_system_admin) {
             </div>
             <div class="modal-body">
                 <p id="statusConfirmMessage" class="status-confirm-message">Are you sure?</p>
+                <div id="statusConfirmCancelFields" style="display:none;">
+                    <div class="form-group" style="margin-top:14px;">
+                        <label for="statusConfirmCancelReason" style="display:block;font-weight:600;margin-bottom:6px;">Cancellation Reason <span style="color:#dc3545;">*</span></label>
+                        <textarea id="statusConfirmCancelReason" rows="4" placeholder="State the reason for cancelling this project..." style="width:100%;resize:vertical;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-family:inherit;font-size:13px;"></textarea>
+                    </div>
+                    <div class="form-group" style="margin-top:12px;">
+                        <label for="statusConfirmCancelPhotos" style="display:block;font-weight:600;margin-bottom:6px;">Photos (optional)</label>
+                        <input type="file" id="statusConfirmCancelPhotos" accept="image/jpeg,image/png,image/gif,image/webp" multiple>
+                        <small style="color:#666;font-size:11px;display:block;margin-top:4px;">Accepted: JPG, PNG, GIF, WebP</small>
+                        <div id="statusConfirmCancelPreviews" class="file-previews" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"></div>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer status-confirm-footer">
-                <button type="button" class="btn-secondary-custom" onclick="closeStatusConfirmModal()">
-                    <i class="fas fa-arrow-left"></i> Go Back
+                <button type="button" id="statusConfirmCloseBtn" class="btn-secondary-custom" onclick="closeStatusConfirmModal()">
+                    <i class="fas fa-arrow-left"></i> <span id="statusConfirmCloseLabel">Go Back</span>
                 </button>
                 <button type="button" id="statusConfirmSubmitBtn" class="btn-success-custom" onclick="confirmStatusAction()">
                     <i class="fas fa-check"></i> Confirm

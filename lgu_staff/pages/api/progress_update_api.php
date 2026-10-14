@@ -794,6 +794,72 @@ if ($method === 'GET') {
             error_log("Update status error: " . $e->getMessage());
             json_response(['success' => false, 'message' => 'Failed to update status: ' . $e->getMessage()], 500);
         }
+    } elseif ($action === 'reopen_report') {
+        // Reopen a CANCELLED report that was restored from the Archive back into
+        // the active workflow (Cancelled -> In Progress). Only rows carrying the
+        // restored_from_archive marker are eligible, so active/pending/completed
+        // projects can never be reopened. Everything else (report details,
+        // attachments, progress updates, assignments and history) is preserved —
+        // only the status changes.
+        $report_id = intval($_POST['report_id'] ?? 0);
+        $source = sanitize_input($_POST['source'] ?? '');
+        $report_table = sanitize_input($_POST['report_table'] ?? '');
+
+        if ($report_id <= 0) json_response(['success' => false, 'message' => 'Invalid report ID']);
+
+        $allowed_tables = ['road_transportation_reports', 'road_maintenance_reports', 'cimm_verification_reports', 'ipms_road_projects'];
+        if (!in_array($report_table, $allowed_tables, true)) {
+            $report_table = rgmap_assignment_report_type_from_source($source);
+        }
+        if (!in_array($report_table, $allowed_tables, true)) {
+            $report_table = 'road_transportation_reports';
+        }
+
+        rgmap_progress_require_supervisor_ownership($conn, $report_id, $source);
+
+        try {
+            if ($report_table === 'cimm_verification_reports') {
+                rgmap_ensure_restored_from_archive_column();
+                $row = fetch_one("SELECT verification_status AS status, restored_from_archive FROM cimm_verification_reports WHERE id = ?", [$report_id], "i");
+                if (!$row) json_response(['success' => false, 'message' => 'Report not found']);
+                if (strtolower(trim((string)($row['status'] ?? ''))) !== 'cancelled' || (int)($row['restored_from_archive'] ?? 0) !== 1) {
+                    json_response(['success' => false, 'message' => 'Only cancelled projects restored from the Archive can be reopened']);
+                }
+                $stmt = $conn->prepare("UPDATE cimm_verification_reports SET verification_status = 'In Progress' WHERE id = ?");
+                $stmt->bind_param("i", $report_id);
+                $stmt->execute();
+                $stmt->close();
+            } elseif ($report_table === 'ipms_road_projects') {
+                require_once __DIR__ . '/ipms_road_projects_data.php';
+                rgmap_ensure_restored_from_archive_column();
+                $pdo = rgmap_ipms_pdo();
+                $stmt = $pdo->prepare("SELECT status, restored_from_archive FROM ipms_road_projects WHERE project_id = ? LIMIT 1");
+                $stmt->execute([$report_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if (!$row) json_response(['success' => false, 'message' => 'Project not found']);
+                if (strtolower(trim((string)($row['status'] ?? ''))) !== 'cancelled' || (int)($row['restored_from_archive'] ?? 0) !== 1) {
+                    json_response(['success' => false, 'message' => 'Only cancelled projects restored from the Archive can be reopened']);
+                }
+                $upd = $pdo->prepare("UPDATE ipms_road_projects SET status = 'in-progress' WHERE project_id = ?");
+                $upd->execute([$report_id]);
+            } else {
+                rgmap_ensure_restored_from_archive_column();
+                $row = fetch_one("SELECT status, restored_from_archive FROM `$report_table` WHERE id = ?", [$report_id], "i");
+                if (!$row) json_response(['success' => false, 'message' => 'Report not found']);
+                if (strtolower(trim((string)($row['status'] ?? ''))) !== 'cancelled' || (int)($row['restored_from_archive'] ?? 0) !== 1) {
+                    json_response(['success' => false, 'message' => 'Only cancelled projects restored from the Archive can be reopened']);
+                }
+                $stmt = $conn->prepare("UPDATE `$report_table` SET status = 'in-progress', updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param("i", $report_id);
+                $stmt->execute();
+                $stmt->close();
+            }
+            log_audit_action($user_id, "Reopened cancelled report", "Report ID: {$report_id}, Table: {$report_table}, Status: in-progress");
+            json_response(['success' => true, 'message' => 'Project reopened and returned to In Progress']);
+        } catch (Exception $e) {
+            error_log("Reopen report error: " . $e->getMessage());
+            json_response(['success' => false, 'message' => 'Failed to reopen project: ' . $e->getMessage()], 500);
+        }
     } elseif ($action === 'cancel_archive') {
         // Cancel a report AND move it to the archive (road_transportation_monitoring.php).
         // Dedicated action so it never affects the plain update_status behavior
@@ -801,8 +867,10 @@ if ($method === 'GET') {
         // status 'cancelled', then removed from the live table.
         $report_id = intval($_POST['report_id'] ?? 0);
         $source = sanitize_input($_POST['source'] ?? '');
+        $cancel_reason = trim((string)($_POST['cancel_reason'] ?? ''));
 
         if ($report_id <= 0) json_response(['success' => false, 'message' => 'Invalid report ID']);
+        if ($cancel_reason === '') json_response(['success' => false, 'message' => 'A cancellation reason is required']);
         rgmap_progress_require_supervisor_ownership($conn, $report_id, $source);
 
         try {
@@ -829,6 +897,18 @@ if ($method === 'GET') {
             if (!$archived) {
                 json_response(['success' => false, 'message' => 'Failed to cancel and archive the report'], 500);
             }
+
+            // Persist the cancellation reason (+ photos) as a progress update so
+            // it stays visible in the Updates timeline and survives archiving,
+            // restoring, and reopening the project.
+            rgmap_progress_record_cancellation_reason(
+                $conn,
+                $report_id,
+                (int)$user_id,
+                $cancel_reason,
+                $_FILES['cancel_media'] ?? []
+            );
+
             // Notify the officer who submitted the original review request; if
             // there was no pending request, notify assigned Road Monitoring
             // Officers about the direct cancellation.
@@ -1080,10 +1160,14 @@ if ($method === 'GET') {
         // supervisor reviews the request.
         $report_id = intval($_POST['report_id'] ?? 0);
         $request_type = sanitize_input($_POST['request_type'] ?? '');
+        $request_reason = trim((string)($_POST['reason'] ?? $_POST['cancel_reason'] ?? ''));
 
         if ($report_id <= 0) json_response(['success' => false, 'message' => 'Invalid report ID']);
         if (!in_array($request_type, ['completion', 'cancellation'], true)) {
             json_response(['success' => false, 'message' => 'Invalid request type']);
+        }
+        if ($request_type === 'cancellation' && $request_reason === '') {
+            json_response(['success' => false, 'message' => 'A cancellation reason is required']);
         }
 
         // Only Road/Transportation Monitoring Officers may submit these requests.
@@ -1181,19 +1265,29 @@ if ($method === 'GET') {
             json_response(['success' => false, 'message' => 'You can only request completion or cancellation for reports assigned to you.'], 403);
         }
 
-        // Route to the module role AND the specific supervisor who assigned this
-        // officer to the report — never every supervisor sharing the same role.
-        $recipient_role = ($category === 'road') ? 'road_ops_supervisor' : 'trans_ops_supervisor';
+        // Route to the specific user who assigned this officer to the report —
+        // the module supervisor for supervisor-assigned projects, or the System
+        // Admin for admin-assigned projects — never every user sharing the role.
+        $module_role = ($category === 'road') ? 'road_ops_supervisor' : 'trans_ops_supervisor';
+        $recipient_role = $module_role;
         $request_label = ($request_type === 'completion') ? 'Request Completion' : 'Request Cancellation';
 
         $assigner = rgmap_resolve_assigning_supervisor($conn, $report_id, $user_id, $source);
         if (!$assigner || empty($assigner['email'])) {
             json_response(['success' => false, 'message' => 'Could not determine the supervisor who assigned this report. Re-assignment may be required.'], 400);
         }
-        // Enforce module separation: road requests only to road supervisors,
-        // transportation only to transportation supervisors.
         $assigner_role = (string)($assigner['role'] ?? '');
-        if ($assigner_role !== '' && $assigner_role !== $recipient_role) {
+        if ($assigner_role === 'system_admin') {
+            // Project was assigned by a System Admin: route the request to that
+            // admin so it appears on the admin side for review and approval.
+            $recipient_role = 'system_admin';
+        } elseif ($assigner_role === '' || $assigner_role === $module_role) {
+            // Supervisor-assigned (or the assigning user has no role on record):
+            // keep the existing module-supervisor routing unchanged.
+            $recipient_role = $module_role;
+        } else {
+            // Enforce module separation: road requests only to road supervisors,
+            // transportation only to transportation supervisors.
             json_response(['success' => false, 'message' => 'This report was assigned by a supervisor outside your module. The request cannot be routed.'], 403);
         }
 
@@ -1210,6 +1304,9 @@ if ($method === 'GET') {
                 'Location: ' . ($report['location'] ?? 'N/A'),
                 'Requested by: ' . $requestor_name,
             ];
+            if ($request_reason !== '') {
+                $details[] = 'Reason: ' . $request_reason;
+            }
             $message = "{$request_label} — " . implode(' | ', $details);
 
             $supervisor_email = (string)$assigner['email'];
@@ -1231,9 +1328,9 @@ if ($method === 'GET') {
                 json_response(['success' => true, 'message' => "{$request_label} already submitted for review. The report status is unchanged."]);
             }
 
-            // Targeted to the assigning supervisor only:
-            //   recipient_role  = module role (road vs transportation separation)
-            //   recipient_email = that supervisor's email
+            // Targeted to the assigner only:
+            //   recipient_role  = module role, or 'system_admin' for admin-assigned
+            //   recipient_email = that assigner's email
             //   update_id       = requesting officer's user_id (for outcome notify)
             $stmt = $conn->prepare(
                 "INSERT INTO report_notifications (report_id, update_id, type, message, recipient_role, recipient_email)
@@ -1241,6 +1338,21 @@ if ($method === 'GET') {
             );
             $stmt->bind_param("iissss", $report_id, $requestor_uid, $request_type, $message, $recipient_role, $supervisor_email);
             $stmt->execute();
+
+            // Persist the request reason (+ optional photos) as a progress update
+            // so the reviewer sees the full details in the existing Updates modal
+            // before approving/rejecting, and the request stays available for
+            // future reference. Reuses report_updates / report_update_media.
+            if ($request_reason !== '') {
+                rgmap_progress_record_cancellation_reason(
+                    $conn,
+                    $report_id,
+                    $requestor_uid,
+                    $request_reason,
+                    $_FILES['request_media'] ?? ($_FILES['cancel_media'] ?? []),
+                    ($request_type === 'cancellation') ? 'Cancellation Request' : 'Completion Request'
+                );
+            }
 
             log_audit_action(
                 $user_id,
@@ -1310,6 +1422,39 @@ function handleProgressMediaUpload($files, $upload_dir, $update_id) {
         }
     }
     return $uploaded;
+}
+
+/**
+ * Persist a cancellation reason (and optional photos) as a normal progress
+ * update so it is visible in the existing Updates timeline and survives
+ * archiving, restoring, and reopening the project. Reuses the report_updates /
+ * report_update_media tables — no schema changes required.
+ *
+ * Returns the new report_updates id, or 0 when nothing was stored.
+ */
+function rgmap_progress_record_cancellation_reason($conn, int $report_id, int $user_id, string $reason, $files = [], string $title = 'Cancellation Reason'): int {
+    $reason = trim($reason);
+    if ($report_id <= 0 || $reason === '') return 0;
+
+    try {
+        $title = trim($title) !== '' ? $title : 'Cancellation Reason';
+        $stmt = $conn->prepare(
+            "INSERT INTO report_updates (report_id, user_id, title, description) VALUES (?, ?, ?, ?)"
+        );
+        $stmt->bind_param("iiss", $report_id, $user_id, $title, $reason);
+        $stmt->execute();
+        $update_id = (int)$conn->insert_id;
+        $stmt->close();
+
+        if ($update_id > 0 && !empty($files['name']) && is_array($files['name'])) {
+            $upload_dir = __DIR__ . '/../../uploads/progress_updates';
+            handleProgressMediaUpload($files, $upload_dir, $update_id);
+        }
+        return $update_id;
+    } catch (Exception $e) {
+        error_log("Record cancellation reason error: " . $e->getMessage());
+        return 0;
+    }
 }
 
 function createReportNotification($report_id, $update_id, $title, $report) {
