@@ -5857,7 +5857,18 @@ if ($is_completed_projects_view || $is_system_admin) {
         function rmAppendAssignmentFields(reportGrid, r, data) {
             data = data || {};
             reportGrid += rmInfoItem('user-cog', 'Officer', r.assignment_officer || data.assignment_officer || '');
-            reportGrid += rmInfoItem('user-tie', 'Supervisor', r.assigned_by || data.assigned_by || '');
+            var title = 'Supervisor';
+            var assigned = r.assigned_by || data.assigned_by || '';
+            var role = r.assigned_by_role || data.assigned_by_role || '';
+            if (role) {
+                var rlow = String(role).toLowerCase();
+                if (rlow === 'system_admin' || rlow === 'admin') {
+                    title = 'Admin';
+                } else {
+                    title = 'Supervisor';
+                }
+            }
+            reportGrid += rmInfoItem('user-tie', title, assigned);
             return reportGrid;
         }
 

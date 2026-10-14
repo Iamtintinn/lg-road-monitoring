@@ -142,6 +142,7 @@ try {
         $report['assigned_by'] = $display['assigned_by'] !== ''
             ? $display['assigned_by']
             : (string)($owner['name'] ?? '');
+        $report['assigned_by_role'] = $display['assigned_by_role'] ?? ($owner['role'] ?? '');
         $report['can_manage_as_supervisor'] = rgmap_supervisor_can_manage_report($conn, $report_id, 'ipms_road_projects');
 
         json_response(['success' => true, 'report' => $report]);
@@ -307,6 +308,7 @@ try {
         $report['assigned_by'] = $display['assigned_by'] !== ''
             ? $display['assigned_by']
             : (string)($owner['name'] ?? '');
+        $report['assigned_by_role'] = $display['assigned_by_role'] ?? ($owner['role'] ?? '');
         $report['assignment_status'] = $display['assignment_officer'] !== '' ? 'assigned' : 'unassigned';
         
         json_response([

@@ -2357,11 +2357,29 @@ function rgmap_get_report_assignment_display($conn, int $report_id, string $repo
         }
     }
 
+    $assigner_role = '';
+    try {
+        if ($supervisor_id > 0) {
+            $su = fetch_one("SELECT role FROM users WHERE id = ?", [$supervisor_id], 'i');
+            if (is_array($su)) {
+                $assigner_role = (string)($su['role'] ?? '');
+            }
+        }
+        if ($assigner_role === '' && $supervisor_name !== '') {
+            $su = fetch_one("SELECT role FROM users WHERE full_name = ? LIMIT 1", [$supervisor_name], 's');
+            if (is_array($su)) {
+                $assigner_role = (string)($su['role'] ?? '');
+            }
+        }
+    } catch (Exception $e) {
+        $assigner_role = '';
+    }
     return [
         'assignment_officer' => $officer_name,
         'assignment_officer_id' => $officer_id,
         'assigned_by' => $supervisor_name,
         'assigned_by_id' => $supervisor_id,
+        'assigned_by_role' => $assigner_role,
     ];
 }
 

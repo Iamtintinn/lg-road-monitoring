@@ -7520,7 +7520,24 @@ if ($focus_id > 0) {
 
         function rmAppendAssignmentFields(reportGrid, r) {
             reportGrid += rmInfoItem('user-cog', 'Officer', r.assignment_officer || '');
-            reportGrid += rmInfoItem('user-tie', 'Supervisor', r.assigned_by || '');
+            var title = 'Supervisor';
+            if (r && r.assigned_by_role) {
+                var role = String(r.assigned_by_role).toLowerCase();
+                if (role === 'system_admin') {
+                    title = 'Admin';
+                } else if (role === 'admin') {
+                    title = 'Admin';
+                } else {
+                    title = 'Supervisor';
+                }
+            } else if (r && r.assigned_by_role) {
+                // already handled
+            } else if (r && r.assigned_by && typeof r.assigned_by === 'string') {
+                var name = r.assigned_by.toLowerCase();
+                // avoid false match if name contains admin? but should not be the case here
+                title = 'Supervisor';
+            }
+            reportGrid += rmInfoItem('user-tie', title, r.assigned_by || '');
             return reportGrid;
         }
 
