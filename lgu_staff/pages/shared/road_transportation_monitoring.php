@@ -6093,6 +6093,7 @@ if ($is_completed_projects_view || $is_system_admin) {
 
             var url = '../api/get_report_details.php?id=' + id + '&type=' + encodeURIComponent(reportType || 'transportation');
             url += '&table=' + encodeURIComponent(table);
+            url += '&_=' + Date.now();
 
             fetch(url)
                 .then(response => response.json())

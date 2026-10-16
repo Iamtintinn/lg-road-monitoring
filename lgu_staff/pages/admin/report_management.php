@@ -133,6 +133,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         case 'update_report':
             handle_update_report();
             break;
+        case 'update_priority':
+            handle_update_priority();
+            break;
         case 'delete_report':
             handle_delete_report();
             break;
@@ -233,6 +236,12 @@ function handle_update_report() {
         set_flash_message('error', 'Invalid report data');
         return;
     }
+
+    $allowed_priorities = ['low', 'medium', 'high'];
+    if (!in_array($priority, $allowed_priorities, true)) {
+        set_flash_message('error', 'Invalid priority value');
+        return;
+    }
     
     // Update the report
     $transport_types = ['potholes', 'road_damage', 'shoulder_damage', 'traffic_jam', 'accident', 'congestion', 'traffic_light_outage', 'vehicle_breakdown', 'traffic_sign_issue', 'transportation', 'infrastructure_issue', 'road_closure', 'parking_violation', 'public_transport_issue'];
@@ -267,6 +276,11 @@ function handle_update_report() {
     // Status is display-only in the Edit Modal — cancelled (and all other
     // statuses) cannot be changed or reopened here.
     $update_fields[] = "priority = ?"; $params[] = $priority; $types .= "s";
+    if ($table === 'road_transportation_reports') {
+        // Keep the View modal's Severity row showing the edited priority
+        // (only this table has a severity column).
+        $update_fields[] = "severity = ?"; $params[] = $priority; $types .= "s";
+    }
     $update_fields[] = "updated_at = NOW()";
     
     if (!empty($title)) { $update_fields[] = "title = ?"; $params[] = $title; $types .= "s"; }
@@ -380,6 +394,86 @@ function handle_update_report() {
             exit;
         }
     }
+}
+
+// Quick inline priority change from the clickable priority badge in the
+// report tables. Reuses the existing role gate, ownership checks and the
+// low/medium/high allowlist — only the priority column is modified.
+function handle_update_priority() {
+    global $conn, $user_id;
+
+    $is_ajax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+
+    // Same role gate as the full edit forms.
+    if (!in_array($_SESSION['role'] ?? '', ['road_ops_supervisor', 'trans_ops_supervisor', 'system_admin'], true)) {
+        $msg = 'You are not authorized to edit reports. Only the Road/Transportation Operations Supervisors may do this.';
+        if ($is_ajax) {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'message' => $msg]);
+            exit;
+        }
+        set_flash_message('error', $msg);
+        return;
+    }
+
+    $report_id = intval($_POST['report_id'] ?? 0);
+    $report_table = sanitize_input($_POST['report_table'] ?? '');
+    $priority = sanitize_input($_POST['priority'] ?? '');
+
+    $allowed_tables = ['road_transportation_reports', 'road_maintenance_reports', 'cimm_verification_reports', 'ipms_road_projects'];
+    // The road tables store priority as ENUM('high','medium','low') so they
+    // cannot accept 'critical' without a schema change; CIMM/IPMS use
+    // VARCHAR and already carry 'critical' values from their feeds.
+    $allowed_priorities = ($report_table === 'cimm_verification_reports' || $report_table === 'ipms_road_projects')
+        ? ['low', 'medium', 'high', 'critical']
+        : ['low', 'medium', 'high'];
+    if ($report_id <= 0 || !in_array($report_table, $allowed_tables, true) || !in_array($priority, $allowed_priorities, true)) {
+        $msg = 'Invalid priority update request';
+        if ($is_ajax) {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'message' => $msg]);
+            exit;
+        }
+        set_flash_message('error', $msg);
+        return;
+    }
+
+    // Same ownership rule as the edit forms (emits its own error on failure).
+    if (!rgmap_require_supervisor_report_ownership($conn, $report_id, $report_table, $is_ajax)) {
+        return;
+    }
+
+    // ipms_road_projects is keyed by project_id, the rest by id.
+    $id_col = ($report_table === 'ipms_road_projects') ? 'project_id' : 'id';
+    // road_transportation_reports is the only table with a severity column;
+    // keep its View-modal Severity row showing the new priority as well.
+    if ($report_table === 'road_transportation_reports') {
+        $stmt = $conn->prepare("UPDATE {$report_table} SET priority = ?, severity = ? WHERE {$id_col} = ?");
+        $stmt->bind_param("ssi", $priority, $priority, $report_id);
+    } else {
+        $stmt = $conn->prepare("UPDATE {$report_table} SET priority = ? WHERE {$id_col} = ?");
+        $stmt->bind_param("si", $priority, $report_id);
+    }
+    if (!$stmt->execute()) {
+        $msg = 'Failed to update priority';
+        if ($is_ajax) {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'message' => $msg]);
+            exit;
+        }
+        set_flash_message('error', $msg);
+        return;
+    }
+
+    log_audit_action($user_id, "Updated report priority", "Report ID: {$report_id}, Table: {$report_table}, Priority: {$priority}");
+
+    $msg = 'Priority updated to ' . ucfirst($priority);
+    if ($is_ajax) {
+        header('Content-Type: application/json');
+        echo json_encode(['success' => true, 'message' => $msg, 'priority' => $priority]);
+        exit;
+    }
+    set_flash_message('success', $msg);
 }
 
 // Ensure the archive table exists and carries every column of BOTH live report
@@ -654,6 +748,18 @@ function handle_update_cimm_report() {
         return;
     }
 
+    // Priority may only use the existing options (same rule as the IPMS edit).
+    $allowed_priorities = ['low', 'medium', 'high', 'critical'];
+    if (!in_array($priority, $allowed_priorities, true)) {
+        if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'message' => 'Invalid priority value']);
+            exit;
+        }
+        set_flash_message('error', 'Invalid priority value');
+        return;
+    }
+
     if (!rgmap_require_supervisor_report_ownership(
         $conn,
         $report_id,
@@ -810,7 +916,7 @@ function handle_update_ipms_project() {
         // status changes stay outside this form.
 
         $priority = sanitize_input($_POST['priority'] ?? '');
-        $allowed_priorities = ['low', 'medium', 'high'];
+        $allowed_priorities = ['low', 'medium', 'high', 'critical'];
         if ($priority !== '' && in_array($priority, $allowed_priorities, true)) {
             $update_fields[] = "priority = ?"; $params[] = $priority;
         }
@@ -1283,6 +1389,25 @@ function rm_render_location_cell(?string $location, int $max_len = 35): void {
 }
 
 /**
+ * Priority badge cell. When the viewer may manage the row (same ownership
+ * rule as the edit forms), the badge is clickable and carries the report
+ * identity so the inline priority dropdown can save back. Otherwise it
+ * renders exactly the previous static badge.
+ */
+function rm_priority_badge_cell($priority_raw, $report_id, $report_table, $can_manage): string {
+    $cls = htmlspecialchars((string)($priority_raw ?? ''));
+    $label = ucfirst($cls);
+    if ($can_manage && (int)$report_id > 0 && $report_table !== '') {
+        return '<td><span class="rm-priority-badge ' . $cls . ' rm-priority-editable" role="button" tabindex="0" title="Change priority"'
+            . ' data-report-id="' . (int)$report_id . '"'
+            . ' data-report-table="' . htmlspecialchars((string)$report_table, ENT_QUOTES) . '"'
+            . ' data-priority="' . htmlspecialchars(strtolower(trim((string)($priority_raw ?? ''))), ENT_QUOTES) . '">'
+            . $label . '</span></td>';
+    }
+    return '<td><span class="rm-priority-badge ' . $cls . '">' . $label . '</span></td>';
+}
+
+/**
  * Render LGU Monitoring table body rows (shared by initial page + AJAX pagination).
  */
 function rm_render_lgu_panel_tbody(
@@ -1372,7 +1497,7 @@ function rm_render_lgu_panel_tbody(
                                 $lgu_district = trim((string)($report['detected_district'] ?? $report['cimm_district'] ?? $report['district'] ?? ''));
                                 echo $lgu_district !== '' ? htmlspecialchars($lgu_district) : '—';
                             ?></td>
-                            <td><span class="rm-priority-badge <?php echo htmlspecialchars((string)($report['priority'] ?? '')); ?>"><?php echo ucfirst(htmlspecialchars((string)($report['priority'] ?? ''))); ?></span></td>
+                            <?php echo rm_priority_badge_cell($report['priority'] ?? '', $report['id'] ?? 0, $lgu_delete_table ?? '', !empty($row_can_manage)); ?>
                             <?php if ($show_assignment_cols): ?>
                             <?php rm_render_assignment_column_cells($report); ?>
                             <?php endif; ?>
@@ -1561,7 +1686,7 @@ function rm_render_citizen_panel_tbody(
                                 $citizen_district = trim((string)($report['detected_district'] ?? $report['district'] ?? ''));
                                 echo $citizen_district !== '' ? htmlspecialchars($citizen_district) : '—';
                             ?></td>
-                            <td><span class="rm-priority-badge <?php echo htmlspecialchars((string)($report['priority'] ?? '')); ?>"><?php echo ucfirst(htmlspecialchars((string)($report['priority'] ?? ''))); ?></span></td>
+                            <?php echo rm_priority_badge_cell($report['priority'] ?? '', $report['id'] ?? 0, $report['_source_table'] ?? 'road_transportation_reports', !empty($row_can_manage)); ?>
                             <?php if ($show_assignment_cols): ?>
                             <?php rm_render_assignment_column_cells($report); ?>
                             <?php endif; ?>
@@ -1740,7 +1865,7 @@ function rm_render_cimm_panel_tbody(array $reports): string {
                                 $cimm_district = trim((string)($row['district'] ?? $row['detected_district'] ?? $row['cimm_district'] ?? ''));
                                 echo $cimm_district !== '' ? htmlspecialchars($cimm_district) : '—';
                             ?></td>
-                            <td><span class="rm-priority-badge <?php echo htmlspecialchars((string)($row['priority'] ?? '')); ?>"><?php echo ucfirst(htmlspecialchars((string)($row['priority'] ?? ''))); ?></span></td>
+                            <?php echo rm_priority_badge_cell($row['priority'] ?? '', $row['id'] ?? 0, 'cimm_verification_reports', !empty($row_can_manage)); ?>
                             <?php if ($show_assignment_cols): ?>
                             <?php rm_render_assignment_column_cells($row); ?>
                             <?php endif; ?>
@@ -5026,6 +5151,20 @@ if ($focus_id > 0) {
         .rm-priority-badge.high { background: rgba(220, 53, 69, 0.15); color: #ef4444; }
         .rm-priority-badge.medium { background: rgba(251, 191, 36, 0.15); color: #f59e0b; }
         .rm-priority-badge.low { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+        .rm-priority-badge.critical { background: rgba(153, 27, 27, 0.15); color: #b91c1c; }
+
+        .rm-priority-badge.rm-priority-editable { cursor: pointer; }
+        .rm-priority-badge.rm-priority-editable:hover { box-shadow: 0 0 0 2px rgba(55, 98, 200, 0.35); }
+        .rm-priority-select {
+            font-size: 12px;
+            font-weight: 600;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            padding: 1px 4px;
+            background: #fff;
+            color: inherit;
+            max-width: 110px;
+        }
 
         .assignment-badge {
             display: inline-block;
@@ -5925,6 +6064,7 @@ if ($focus_id > 0) {
         .rm-dash .rm-priority-badge.low { background: var(--badge-approved-bg) !important; color: var(--badge-approved-text) !important; }
         .rm-dash .rm-status-badge.cancelled,
         .rm-dash .rm-priority-badge.high { background: var(--badge-cancelled-bg) !important; color: var(--badge-cancelled-text) !important; }
+        .rm-dash .rm-priority-badge.critical { background: var(--badge-cancelled-bg) !important; color: var(--badge-cancelled-text) !important; }
 
         .rm-dash .rm-empty-state { padding: 40px 16px; color: var(--text-secondary); }
         .rm-dash .rm-empty-state h4 { color: var(--text-primary); font-size: 15px; }
@@ -6931,6 +7071,7 @@ if ($focus_id > 0) {
                                     <option value="low">Low</option>
                                     <option value="medium">Medium</option>
                                     <option value="high">High</option>
+                                    <option value="critical">Critical</option>
                                 </select>
                             </div>
                         </div>
@@ -7044,6 +7185,7 @@ if ($focus_id > 0) {
                                     <option value="low">Low</option>
                                     <option value="medium">Medium</option>
                                     <option value="high">High</option>
+                                    <option value="critical">Critical</option>
                                 </select>
                             </div>
                         </div>
@@ -7788,6 +7930,7 @@ if ($focus_id > 0) {
         function viewReport(id, type, table) {
             var url = `../api/get_report_details.php?id=${id}&type=${encodeURIComponent(type)}`;
             if (table) url += `&table=${encodeURIComponent(table)}`;
+            url += `&_=${Date.now()}`;
             fetch(url)
                 .then(response => response.json())
                 .then(data => {
@@ -9360,6 +9503,7 @@ if ($focus_id > 0) {
                 case 'high': return '#dc3545';
                 case 'medium': return '#ffc107';
                 case 'low': return '#28a745';
+                case 'critical': return '#991b1b';
                 default: return '#6c757d';
             }
         }
@@ -9624,6 +9768,123 @@ if ($focus_id > 0) {
                 submitBtn.disabled = false;
                 indicator.textContent = 'Error saving changes';
             });
+        });
+
+        // Clickable priority badges: authorized users change priority inline.
+        // Only badges rendered with .rm-priority-editable (server-gated by the
+        // same ownership rules as the edit forms) open the dropdown.
+        function rmOpenPriorityEditor(badge) {
+            if (!badge || badge.getAttribute('data-editing') === '1') return;
+            var current = String(badge.getAttribute('data-priority') || badge.textContent || '').trim().toLowerCase();
+            badge.setAttribute('data-editing', '1');
+            badge.setAttribute('data-original-label', badge.textContent);
+            badge.innerHTML = '';
+            var select = document.createElement('select');
+            select.className = 'rm-priority-select';
+            select.setAttribute('aria-label', 'Change priority');
+            // 'critical' is only offered where the column accepts it
+            // (CIMM/IPMS use VARCHAR; the road tables are ENUM low/medium/high).
+            var badgeTable = badge.getAttribute('data-report-table') || '';
+            var priorityOptions = ['low', 'medium', 'high'];
+            if (badgeTable === 'cimm_verification_reports' || badgeTable === 'ipms_road_projects') {
+                priorityOptions.push('critical');
+            }
+            priorityOptions.forEach(function(v) {
+                var opt = document.createElement('option');
+                opt.value = v;
+                opt.textContent = v.charAt(0).toUpperCase() + v.slice(1);
+                if (v === current) opt.selected = true;
+                select.appendChild(opt);
+            });
+            badge.appendChild(select);
+            try { select.focus(); } catch (e) {}
+            var done = false;
+            function restoreBadge() {
+                if (done) return;
+                done = true;
+                badge.removeAttribute('data-editing');
+                badge.textContent = badge.getAttribute('data-original-label') || '';
+            }
+            select.addEventListener('change', function() {
+                if (done) return;
+                var newVal = select.value;
+                if (newVal === current) { restoreBadge(); return; }
+                done = true;
+                rmSavePriority(badge, select, newVal);
+            });
+            select.addEventListener('keydown', function(ev) {
+                if (ev.key === 'Escape') {
+                    ev.stopPropagation();
+                    restoreBadge();
+                    try { badge.focus(); } catch (e) {}
+                }
+            });
+            select.addEventListener('blur', function() {
+                setTimeout(function() {
+                    if (!done && document.activeElement !== select) {
+                        restoreBadge();
+                    }
+                }, 150);
+            });
+        }
+        function rmSavePriority(badge, select, newVal) {
+            select.disabled = true;
+            var reportId = badge.getAttribute('data-report-id');
+            var reportTable = badge.getAttribute('data-report-table');
+            var csrfInput = document.querySelector('input[name="csrf_token"]');
+            var fd = new FormData();
+            fd.append('action', 'update_priority');
+            fd.append('csrf_token', csrfInput ? csrfInput.value : '');
+            fd.append('report_id', reportId || '');
+            fd.append('report_table', reportTable || '');
+            fd.append('priority', newVal);
+            fetch('', {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                body: fd
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                badge.removeAttribute('data-editing');
+                if (data && data.success) {
+                    var p = String(data.priority || newVal).toLowerCase();
+                    badge.className = 'rm-priority-badge ' + p + ' rm-priority-editable';
+                    badge.setAttribute('data-priority', p);
+                    badge.textContent = p.charAt(0).toUpperCase() + p.slice(1);
+                    // Keep the CIMM View modal in sync: it reads from the
+                    // preloaded cimmData array rather than refetching.
+                    try {
+                        if (reportTable === 'cimm_verification_reports' && typeof cimmData !== 'undefined' && Array.isArray(cimmData)) {
+                            cimmData.forEach(function(cr) {
+                                if (cr && String(cr.id) === String(reportId)) { cr.priority = p; }
+                            });
+                        }
+                    } catch (e) {}
+                    showNotification(data.message || 'Priority updated', 'success');
+                } else {
+                    badge.textContent = badge.getAttribute('data-original-label') || '';
+                    showNotification((data && data.message) || 'Failed to update priority', 'error');
+                }
+            })
+            .catch(function() {
+                badge.removeAttribute('data-editing');
+                badge.textContent = badge.getAttribute('data-original-label') || '';
+                showNotification('Network error while updating priority', 'error');
+            });
+        }
+        document.addEventListener('click', function(e) {
+            var badge = e.target && e.target.closest ? e.target.closest('.rm-priority-badge.rm-priority-editable') : null;
+            if (!badge || badge.getAttribute('data-editing') === '1') return;
+            e.stopPropagation();
+            rmOpenPriorityEditor(badge);
+        });
+        document.addEventListener('keydown', function(e) {
+            var badge = e.target && e.target.closest ? e.target.closest('.rm-priority-badge.rm-priority-editable') : null;
+            if (!badge) return;
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                rmOpenPriorityEditor(badge);
+            }
         });
 
         // Panel search — client-side filter for panels that are not server-paginated
