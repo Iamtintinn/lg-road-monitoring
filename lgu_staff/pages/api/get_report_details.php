@@ -6,6 +6,7 @@ ini_set('log_errors', 1);
 require_once '../../includes/session_config.php';
 require_once '../../includes/config.php';
 require_once '../../includes/functions.php';
+require_once __DIR__ . '/cimm_verification_data.php';
 
 // Re-suppress display_errors after config.php (which re-enables it on localhost)
 error_reporting(E_ALL);
@@ -196,11 +197,13 @@ try {
     if ($table === 'cimm_verification_reports') {
         $query = "SELECT id, reference_code AS report_id, infrastructure AS title, issue AS description,
                     location, coord_lat AS latitude, coord_lng AS longitude, priority,
-                    verification_status AS status, approval_status, reporter_name,
+                    verification_status AS status, approval_status, resolution_status, reporter_name,
                     verification_status AS cimm_status,
                     district, district AS detected_district, district AS cimm_district,
                     COALESCE(submitted_at, verified_at, synced_at) AS created_at, verified_at,
-                    engineer, budget_allocation, 'cimm' AS source, 'road' AS report_category
+                    engineer, budget, budget_allocation,
+                    starting_date AS start_date, estimated_end_date AS end_date,
+                    'cimm' AS source, 'road' AS report_category
                     FROM cimm_verification_reports WHERE id = ?";
     } elseif ($table === 'road_transportation_reports') {
         $query = "SELECT id, report_id, report_type, title, department, priority, status, created_date, due_date, description,
@@ -297,6 +300,33 @@ try {
             $report['update_media'] = $update_media;
         } catch (Exception $e) {
             $report['update_media'] = [];
+        }
+
+        // CIMM-only display fields mirroring mapCimmToReportManagement() in
+        // report_management.php (start/end dates, budget, mapped status) so
+        // View callers get the same details without a schema change.
+        if ($table === 'cimm_verification_reports') {
+            $cimm_verification = (string)($report['status'] ?? '');
+            $cimm_override_map = [
+                'Pending'     => 'pending',
+                'Approved'    => 'approved',
+                'In Progress' => 'in-progress',
+                'Completed'   => 'completed',
+                'Cancelled'   => 'cancelled',
+            ];
+            if ($cimm_verification === 'Dismissed') {
+                $report['display_status'] = 'cancelled';
+            } elseif (isset($cimm_override_map[$cimm_verification])) {
+                $report['display_status'] = $cimm_override_map[$cimm_verification];
+            } else {
+                $report['display_status'] = function_exists('cimm_resolution_status_to_display')
+                    ? cimm_resolution_status_to_display(
+                        isset($report['resolution_status']) ? (string)$report['resolution_status'] : null,
+                        isset($report['approval_status']) ? (string)$report['approval_status'] : null
+                      )
+                    : 'pending';
+            }
+            $report['estimation'] = $report['budget_allocation'] ?? $report['budget'] ?? 0;
         }
 
         $owner = rgmap_get_report_owner_supervisor($conn, $report_id, $table);

@@ -6103,9 +6103,101 @@ if ($is_completed_projects_view || $is_system_admin) {
                     }
                     const r = resp.report;
 
+                    // CIMM reports use the same read-only layout as the
+                    // report_management.php CIMM viewer (viewCimmReport).
+                    if (src === 'cimm' || src === 'external') {
+                        var cimmStatusLabels = { 'pending': 'Pending Review', 'in-progress': 'Flagged', 'completed': 'Verified', 'cancelled': 'Dismissed' };
+                        var cimmStatusStyles = {
+                            'pending':    {bg:'rgba(251,191,36,0.15)', color:'#f59e0b'},
+                            'approved':   {bg:'rgba(34,197,94,0.15)',  color:'#22c55e'},
+                            'completed':  {bg:'rgba(34,197,94,0.15)',  color:'#22c55e'},
+                            'cancelled':  {bg:'rgba(220,53,69,0.15)',  color:'#ef4444'},
+                            'in-progress':{bg:'rgba(59,130,246,0.15)', color:'#3b82f6'}
+                        };
+                        var cimmPStyles = {
+                            'high':   {bg:'rgba(220,53,69,0.15)', color:'#ef4444'},
+                            'medium': {bg:'rgba(251,191,36,0.15)', color:'#f59e0b'},
+                            'low':    {bg:'rgba(34,197,94,0.15)',  color:'#22c55e'}
+                        };
+
+                        // Header
+                        document.getElementById('rm-report-id').textContent = 'Report #' + (r.report_id || '—');
+                        document.getElementById('rm-title').textContent = r.title || '—';
+
+                        var cst = String(r.display_status || r.status || 'pending').toLowerCase();
+                        var css = cimmStatusStyles[cst] || {bg:'rgba(107,114,128,0.15)', color:'#6b7280'};
+                        var cpp = (r.priority || 'medium').toLowerCase();
+                        var cps = cimmPStyles[cpp] || {bg:'rgba(107,114,128,0.15)', color:'#6b7280'};
+
+                        var cBadgesHtml = rmBadge(cimmStatusLabels[cst] || r.status || '—', css.bg, css.color);
+                        cBadgesHtml += rmBadge(r.priority || '—', cps.bg, cps.color);
+                        cBadgesHtml += '<span style="display:inline-block;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;background:rgba(249,115,22,0.12);color:#c2410c;">CIMM</span>';
+                        document.getElementById('rm-badges').innerHTML = cBadgesHtml;
+
+                        // Report Information
+                        var cReportGrid = '';
+                        cReportGrid += rmInfoItem('building', 'Infrastructure', r.title);
+                        cReportGrid += rmInfoItem('calendar-alt', 'Start Date', rmFormatDate(r.start_date));
+                        cReportGrid += rmInfoItem('calendar-check', 'End Date', rmFormatDate(r.end_date));
+                        cReportGrid += rmInfoItem('dollar-sign', 'Budget', r.estimation ? '₱' + parseFloat(r.estimation).toLocaleString('en-PH', {minimumFractionDigits:2}) : '—');
+                        if (r.budget_allocation) {
+                            cReportGrid += rmInfoItem('dollar-sign', 'Budget Allocation', '₱' + parseFloat(r.budget_allocation).toLocaleString('en-PH', {minimumFractionDigits:2}));
+                        }
+                        cReportGrid = rmAppendAssignmentFields(cReportGrid, r, data);
+                        document.getElementById('rm-report-grid').innerHTML = cReportGrid;
+
+                        // Source & Department
+                        var cSourceGrid = '';
+                        cSourceGrid += rmInfoItem('server', 'Source', 'CIMM');
+                        if (r.reporter_name) {
+                            cSourceGrid += rmInfoItem('user', 'Reported By', r.reporter_name);
+                        }
+                        document.getElementById('rm-source-grid').innerHTML = cSourceGrid;
+
+                        // Hide the portal-only creator section (not part of the CIMM layout).
+                        var cCreatorSection = document.getElementById('rm-creator-section');
+                        if (cCreatorSection) cCreatorSection.style.display = 'none';
+
+                        // Location
+                        var cLocVal = r.location || '—';
+                        if (r.latitude && r.longitude && r.latitude != 0 && r.longitude != 0) {
+                            cLocVal += '<br><a href="https://www.google.com/maps?q=' + r.latitude + ',' + r.longitude + '" target="_blank" style="color:#3762c8;font-size:12px;text-decoration:none;"><i class="fas fa-external-link-alt" style="font-size:10px;"></i> View on Map</a>';
+                        }
+                        var cLocationGrid = '<div class="rm-info-item rm-info-value-full"><div class="rm-info-icon"><i class="fas fa-map-marker-alt"></i></div><div><div class="rm-info-label">Location</div><div class="rm-info-value">' + cLocVal + '</div></div></div>';
+                        cLocationGrid += rmInfoItem('map-pin', 'District', r.district || r.detected_district || r.cimm_district);
+                        document.getElementById('rm-location-grid').innerHTML = cLocationGrid;
+
+                        // View Map button: only shown when the report has a saved
+                        // coordinate point (latitude / longitude).
+                        currentRmPoint = (r.latitude && r.longitude && r.latitude != 0 && r.longitude != 0)
+                            ? [[parseFloat(r.latitude), parseFloat(r.longitude)]]
+                            : null;
+                        var cRmMapBtn = document.getElementById('rm-view-map-btn');
+                        if (cRmMapBtn) cRmMapBtn.style.display = currentRmPoint ? '' : 'none';
+                        var cRmMapContainer = document.getElementById('rm-map-container');
+                        if (cRmMapContainer) cRmMapContainer.classList.remove('road-map-visible');
+
+                        // Description
+                        document.getElementById('rm-description').textContent = r.description || 'No description provided.';
+
+                        // Attachments (none available on CIMM cards)
+                        document.getElementById('rm-attachments').innerHTML = '<div style="padding:8px 0;color:#9ca3af;font-size:14px;">No attachments.</div>';
+
+                        // Timeline
+                        var cTimelineGrid = '';
+                        cTimelineGrid += rmInfoItem('calendar-check', 'Created', rmFormatDate(r.start_date));
+                        if (r.end_date) {
+                            cTimelineGrid += rmInfoItem('flag-checkered', 'Target End', rmFormatDate(r.end_date));
+                        }
+                        document.getElementById('rm-timeline-grid').innerHTML = cTimelineGrid;
+
+                        openViewDetailsModal();
+                        return;
+                    }
+
                     var typeLabels = {
                         'traffic_jam': 'Traffic Jam',
-                        'accident': 'Vehicle Accident',
+                        'accident': 'Accident',
                         'road_closure': 'Road Closure',
                         'traffic_light_outage': 'Traffic Light Outage',
                         'congestion': 'Heavy Congestion',
@@ -6117,7 +6209,7 @@ if ($is_completed_projects_view || $is_system_admin) {
                         'road_damage': 'Road Damage',
                         'cracks': 'Road Cracks',
                         'erosion': 'Road Erosion',
-                        'flooding': 'Street Flooding',
+                        'flooding': 'Flooding',
                         'debris': 'Road Debris',
                         'shoulder_damage': 'Shoulder Damage',
                         'marking_fade': 'Faded Road Markings',
@@ -8292,14 +8384,37 @@ if ($is_completed_projects_view || $is_system_admin) {
                     ['Type', labelize(d.report_type)],
                     ['Department', labelize(d.department)],
                     ['Assignment', assignment],
+                    ['Assigned By', pretty(d.assigned_by) || ''],
                     ['Engineer', pretty(d.engineer || d.cimm_engineer_name)],
                 ];
                 if (!isTransportation) {
+                    // CIMM road reports carry their project budget in budget /
+                    // estimation (budget_allocation is often unset); surface
+                    // both budget fields like the CIMM View modal does.
+                    var exportBudgetRaw = (d.estimation !== null && d.estimation !== undefined && d.estimation !== '')
+                        ? d.estimation
+                        : (d.budget !== null && d.budget !== undefined && d.budget !== ''
+                            ? d.budget
+                            : (d.budget_allocation !== null && d.budget_allocation !== undefined && d.budget_allocation !== '' ? d.budget_allocation : ''));
+                    if (exportBudgetRaw !== '' && isFinite(parseFloat(exportBudgetRaw)) && parseFloat(exportBudgetRaw) > 0) {
+                        detailPairs.push(['Budget', fmtBudget(exportBudgetRaw)]);
+                    }
                     detailPairs.push(['Budget Allocation', fmtBudget(
                         (d.budget_allocation !== null && d.budget_allocation !== undefined && d.budget_allocation !== '')
                             ? d.budget_allocation
                             : d.cimm_budget
                     ), 'always']);
+                    // Same Proposed Start/End rows as the shared export used by
+                    // report_management.php; CIMM road reports carry these in
+                    // start_date / end_date.
+                    var proposedStart = pretty(d.start_date || d.cimm_starting_date);
+                    var proposedEnd = pretty(d.end_date || d.due_date || d.cimm_estimated_end_date);
+                    if (proposedStart) {
+                        detailPairs.push(['Proposed Start Date', fmtDate(proposedStart)]);
+                    }
+                    if (proposedEnd) {
+                        detailPairs.push(['Proposed End Date', fmtDate(proposedEnd)]);
+                    }
                 }
                 var detailsRows = pairRows(detailPairs.concat([
                     ['Reported By', pretty(d.reporter_name)],
@@ -10189,9 +10304,9 @@ if ($is_completed_projects_view || $is_system_admin) {
                     <div class="rm-modal-section-title"><i class="fas fa-info-circle"></i> Report Information</div>
                     <div class="rm-info-grid" id="rm-report-grid"></div>
                 </div>
-                <!-- Source & Assignment -->
+                <!-- Source & Department -->
                 <div class="rm-modal-section">
-                    <div class="rm-modal-section-title"><i class="fas fa-building"></i> Source &amp; Assignment</div>
+                    <div class="rm-modal-section-title"><i class="fas fa-building"></i> Source &amp; Department</div>
                     <div class="rm-info-grid" id="rm-source-grid"></div>
                 </div>
                 <!-- Report Creator (Road Supervisor portal only) -->
