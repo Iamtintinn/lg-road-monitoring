@@ -516,6 +516,48 @@ try {
     error_log("Quick insights error: " . $e->getMessage());
 }
 
+// Almost Due Projects: active road_transportation_reports whose due_date
+// falls inside the shared almost-due window. Same predicate (status scope +
+// end-date window) the monitoring page highlights, so the numbers match.
+// Completed, cancelled, archived (non-live) and overdue rows are excluded.
+$almost_due_count = 0;
+try {
+    $ad_stmt = $conn->prepare(
+        "SELECT COUNT(*) AS count FROM road_transportation_reports r
+         WHERE r.status IN ('approved', 'in-progress')
+           AND (r.created_by IS NULL OR r.created_by = 0
+                OR r.cimm_sync_status IS NULL OR r.cimm_sync_status <> 'pushed'
+                OR (r.report_category IN ('transportation', 'road') AND r.report_source = 'local' AND r.created_by != 0))"
+        . ' AND ' . rgmap_almost_due_where('r')
+    );
+    $ad_stmt->execute();
+    $almost_due_count = (int)$ad_stmt->get_result()->fetch_assoc()['count'];
+    $ad_stmt->close();
+} catch (Exception $e) {
+    error_log('Dashboard almost-due count error: ' . $e->getMessage());
+    $almost_due_count = 0;
+}
+
+// Almost Due list: most urgent first (same scope as the count above).
+$almost_due_reports = [];
+try {
+    $ad_list = $conn->prepare(
+        "SELECT id, report_id, title, status, priority, due_date, created_at FROM road_transportation_reports r
+         WHERE r.status IN ('approved', 'in-progress')
+           AND (r.created_by IS NULL OR r.created_by = 0
+                OR r.cimm_sync_status IS NULL OR r.cimm_sync_status <> 'pushed'
+                OR (r.report_category IN ('transportation', 'road') AND r.report_source = 'local' AND r.created_by != 0))"
+        . ' AND ' . rgmap_almost_due_where('r')
+        . " ORDER BY r.due_date ASC, r.id ASC LIMIT 5"
+    );
+    $ad_list->execute();
+    $almost_due_reports = $ad_list->get_result()->fetch_all(MYSQLI_ASSOC);
+    $ad_list->close();
+} catch (Exception $e) {
+    error_log('Dashboard almost-due list error: ' . $e->getMessage());
+    $almost_due_reports = [];
+}
+
 // Reports by source (for pie chart)
 $reports_by_source = [];
 try {
@@ -727,6 +769,8 @@ $type_analytics_chart_height = max(260, min(520, count($type_analytics_counts) *
         .summary-card.cyan .card-icon { background: rgba(6,182,212,0.16); color: #0891b2; }
         .summary-card .card-value { font-size: 28px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.03em; }
         .summary-card .card-label { font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-top: 2px; }
+        .admin-dash a.badge-duesoon { text-decoration: none; }
+        .admin-dash .badge-duesoon { background: rgba(245,158,11,0.16); color: #d97706; }
 
         .main-grid { display: grid; grid-template-columns: 1fr 380px; gap: 24px; margin-bottom: 24px; }
         .left-col, .right-col { min-width: 0; }
@@ -752,6 +796,7 @@ $type_analytics_chart_height = max(260, min(520, count($type_analytics_counts) *
         .admin-dash .panel-announcements::after { background: #0ea5e9; }
         .admin-dash .panel-approvals::after { background: var(--color-warning); }
         .admin-dash .panel-priority::after { background: var(--color-danger); }
+        .admin-dash .panel-duesoon::after { background: var(--color-warning); }
         .admin-dash .card-header {
             display: flex; justify-content: space-between; align-items: center; gap: 10px;
             margin: -20px -20px 16px; padding: 14px 18px 14px 20px;
@@ -760,6 +805,7 @@ $type_analytics_chart_height = max(260, min(520, count($type_analytics_counts) *
         }
         .admin-dash .panel-approvals .card-header { background: var(--color-warning-bg); }
         .admin-dash .panel-priority .card-header { background: var(--color-danger-bg); }
+        .admin-dash .panel-duesoon .card-header { background: var(--color-warning-bg); }
         .admin-dash .panel-awaiting .card-header { background: var(--color-info-bg); }
         .admin-dash .panel-activity .card-header { background: var(--color-purple-bg); }
         .admin-dash .panel-announcements .card-header { background: rgba(14, 165, 233, 0.12); }
@@ -778,6 +824,7 @@ $type_analytics_chart_height = max(260, min(520, count($type_analytics_counts) *
         .admin-dash .panel-announcements .title-icon { background: rgba(14, 165, 233, 0.15); color: #0284c7; }
         .admin-dash .panel-approvals .title-icon { background: var(--color-warning-bg); color: var(--color-warning); }
         .admin-dash .panel-priority .title-icon { background: var(--color-danger-bg); color: var(--color-danger); }
+        .admin-dash .panel-duesoon .title-icon { background: var(--color-warning-bg); color: var(--color-warning); }
         .admin-dash .panel-type-analytics::after { background: #6366f1; }
         .admin-dash .panel-type-analytics .title-icon { background: rgba(99, 102, 241, 0.12); color: #6366f1; }
         .admin-dash .panel-period-note {
@@ -1054,6 +1101,7 @@ $type_analytics_chart_height = max(260, min(520, count($type_analytics_counts) *
         }
         body.dark-mode .admin-dash .panel-approvals .card-header { background: var(--color-warning-bg) !important; }
         body.dark-mode .admin-dash .panel-priority .card-header { background: var(--color-danger-bg) !important; }
+        body.dark-mode .admin-dash .panel-duesoon .card-header { background: var(--color-warning-bg) !important; }
         body.dark-mode .admin-dash .panel-awaiting .card-header { background: var(--color-info-bg) !important; }
         body.dark-mode .admin-dash .panel-activity .card-header { background: var(--color-purple-bg) !important; }
         body.dark-mode .admin-dash .card-title,
@@ -1414,6 +1462,34 @@ $type_analytics_chart_height = max(260, min(520, count($type_analytics_counts) *
                                         <div class="widget-meta"><?php echo htmlspecialchars($hp['report_id'] ?? ''); ?> &middot; <?php echo htmlspecialchars($hp_status); ?></div>
                                     </div>
                                     <a href="report_management.php?focus_report_id=<?php echo (int)($hp['id'] ?? 0); ?>" class="btn-sm btn-primary"><i class="fas fa-eye"></i> View</a>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="card panel-duesoon" data-source="road_transportation_reports">
+                    <div class="card-header">
+                        <h3 class="card-title"><span class="title-icon"><i class="fas fa-hourglass-end"></i></span> Almost Due Projects</h3>
+                        <a href="../shared/road_transportation_monitoring.php?almost_due=1" class="badge badge-duesoon" title="View almost-due projects"><?php echo (int)$almost_due_count; ?></a>
+                    </div>
+                    <div class="activity-list">
+                        <?php if ($almost_due_count === 0 || empty($almost_due_reports)): ?>
+                            <div class="empty-state"><i class="fas fa-calendar-check"></i>No almost-due projects.</div>
+                        <?php else: ?>
+                            <?php foreach ($almost_due_reports as $ad): ?>
+                                <?php
+                                    $ad_status = ucfirst(str_replace('-', ' ', (string)($ad['status'] ?? '')));
+                                    $ad_due_ts = strtotime((string)($ad['due_date'] ?? ''));
+                                    $ad_left = ($ad_due_ts !== false) ? (int)round(($ad_due_ts - strtotime(date('Y-m-d'))) / 86400) : -1;
+                                    $ad_when = ($ad_left < 0) ? '' : (($ad_left === 0) ? 'Due today' : (($ad_left === 1) ? 'Tomorrow' : ('In ' . $ad_left . ' days')));
+                                ?>
+                                <div class="widget-item">
+                                    <div class="widget-avatar avatar-warning"><i class="fas fa-hourglass-end"></i></div>
+                                    <div class="widget-info">
+                                        <div class="widget-title"><?php echo htmlspecialchars($ad['title'] ?? 'Untitled'); ?></div>
+                                        <div class="widget-meta"><?php echo htmlspecialchars($ad['report_id'] ?? ''); ?> &middot; Due <?php echo $ad_due_ts !== false ? date('M d, Y', $ad_due_ts) : '—'; ?><?php echo $ad_when !== '' ? ' (' . $ad_when . ')' : ''; ?> &middot; <?php echo htmlspecialchars($ad_status); ?></div>
+                                    </div>
+                                    <a href="../shared/road_transportation_monitoring.php?almost_due=1" class="btn-sm btn-primary"><i class="fas fa-eye"></i> View</a>
                                 </div>
                             <?php endforeach; ?>
                         <?php endif; ?>

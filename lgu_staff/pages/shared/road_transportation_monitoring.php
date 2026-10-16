@@ -246,7 +246,7 @@ function getEnhancedStats() {
 //     in-progress on Active Monitoring (same as transport/CIMM), or
 //     status = 'completed' on Completed Projects
 //   - CIMM reports whose verification_status is 'Verified'
-function getRecentSubmissions($limit = 10, $status_filter = 'all', $type_filter = 'all', $transport_only = false, $road_only = false, $assigned_to_user_id = null, $completed_only = false, $skip_active_assignment_filter = false) {
+function getRecentSubmissions($limit = 10, $status_filter = 'all', $type_filter = 'all', $transport_only = false, $road_only = false, $assigned_to_user_id = null, $completed_only = false, $skip_active_assignment_filter = false, $almost_due_only = false) {
     global $conn;
     $reports = [];
     if (!$conn) return $reports;
@@ -275,6 +275,14 @@ function getRecentSubmissions($limit = 10, $status_filter = 'all', $type_filter 
     $ipms_status_sql = $completed_only
         ? rgmap_ipms_completed_only_where_sql()
         : "status IN ('approved', 'in-progress')";
+
+    // Almost-due mode: only transport rows whose end date falls in the
+    // shared window can match (CIMM/IPMS merges are skipped below), and the
+    // unassigned-hide is bypassed so every counted project stays reachable.
+    $almost_due_sql = ($almost_due_only && !$completed_only) ? ' AND ' . rgmap_almost_due_where('t') : '';
+    if ($almost_due_only && !$completed_only) {
+        $skip_active_assignment_filter = true;
+    }
 
     // Helper to append shared WHERE/ORDER/LIMIT clauses and run a query
     $fetch = function ($sql, $status_filter, $type_filter, $limit) use ($conn, $completed_only) {
@@ -334,14 +342,15 @@ function getRecentSubmissions($limit = 10, $status_filter = 'all', $type_filter 
                AND (t.created_by IS NULL OR t.created_by = 0
                     OR t.cimm_sync_status IS NULL OR t.cimm_sync_status <> 'pushed'
                     OR (t.report_category IN ('transportation', 'road') AND t.report_source = 'local' AND t.created_by != 0))
-                   $transport_category_filter{$road_category_filter}",
+                   $transport_category_filter{$road_category_filter}{$almost_due_sql}",
             $status_filter, $type_filter, $limit
         ));
 
         // 2. Infrastructure Projects (ipms_road_projects).
         //    Active Monitoring: locally approved. Completed Projects: status = completed.
         //    Excluded for Transportation Operations Supervisors.
-        if (!$transport_only) {
+        //    Skipped in almost-due mode (no due_date to match on).
+        if (!$transport_only && !($almost_due_only && !$completed_only)) {
             $reports = array_merge($reports, $fetch(
                 "SELECT project_id AS id,
                         CAST(project_id AS CHAR) AS report_id,
@@ -374,7 +383,8 @@ function getRecentSubmissions($limit = 10, $status_filter = 'all', $type_filter 
 
         // 3. CIMM reports (finalized = verification_status 'Approved').
         //    Excluded for Transportation Operations Supervisors.
-        if (!$transport_only) {
+        //    Skipped in almost-due mode (no due_date to match on).
+        if (!$transport_only && !($almost_due_only && !$completed_only)) {
             try {
             $reports = array_merge($reports, $fetch(
                 "SELECT * FROM (
@@ -1155,6 +1165,16 @@ if ($focus_report_id > 0 && !$is_completed_projects_view) {
     $type_filter = 'all';
 }
 
+// Almost-due filter (?almost_due=1) from the admin dashboard: show only
+// active road projects whose end date falls in the shared almost-due
+// window, and highlight them. Like the focus link above, the status/type
+// filters reset so the full counted set is visible on landing.
+$almost_due_only = (($_GET['almost_due'] ?? '') === '1') && !$is_completed_projects_view;
+if ($almost_due_only) {
+    $status_filter = 'all';
+    $type_filter = 'all';
+}
+
 // Get data for the page
 $alerts = getActiveAlerts();
 $roads = getRoadStatus();
@@ -1176,8 +1196,45 @@ $recent_reports = getRecentSubmissions(
     $is_road_only_role,
     $officer_assigned_user_id,
     $is_completed_projects_view,
-    $road_supervisor_your_reports
+    $road_supervisor_your_reports,
+    $almost_due_only
 );
+
+// Banner total for almost-due mode: same end-date criterion as the
+// dashboard count, scoped like the visible list (role category + the
+// current status filter) so the number always matches what can display.
+$almost_due_total = 0;
+$almost_due_clear_url = 'road_transportation_monitoring.php';
+if ($almost_due_only) {
+    try {
+        $ad_count_sql = "SELECT COUNT(*) AS c FROM road_transportation_reports t"
+            . " WHERE t.status IN ('approved', 'in-progress')"
+            . " AND (t.created_by IS NULL OR t.created_by = 0"
+            . " OR t.cimm_sync_status IS NULL OR t.cimm_sync_status <> 'pushed'"
+            . " OR (t.report_category IN ('transportation', 'road') AND t.report_source = 'local' AND t.created_by != 0))"
+            . " AND " . rgmap_almost_due_where('t');
+        if ($is_transport_supervisor) {
+            $ad_count_sql .= " AND t.report_category = 'transportation'";
+        }
+        if ($is_road_only_role) {
+            $ad_count_sql .= " AND t.report_category = 'road'";
+        }
+        if ($status_filter !== 'all') {
+            $ad_count_sql .= " AND LOWER(t.status) = LOWER('" . $conn->real_escape_string($status_filter) . "')";
+        }
+        $ad_res = $conn->query($ad_count_sql);
+        if ($ad_res) {
+            $almost_due_total = (int)$ad_res->fetch_assoc()['c'];
+        }
+    } catch (Exception $e) {
+        error_log('Almost-due banner count error: ' . $e->getMessage());
+    }
+    $clear_params = $_GET;
+    unset($clear_params['almost_due']);
+    if (!empty($clear_params)) {
+        $almost_due_clear_url .= '?' . http_build_query($clear_params);
+    }
+}
 
 if ($focus_report_id > 0) {
     $focus_row = resolve_recent_focus_row($focus_report_id, $focus_source_hint);
@@ -2190,6 +2247,22 @@ if ($is_completed_projects_view || $is_system_admin) {
             background: #eef5ff;
             animation: recentFocusPulse 1s ease-in-out 4;
         }
+        .almost-due-banner {
+            display: flex; align-items: center; gap: 12px;
+            background: rgba(245,158,11,0.10);
+            border: 1px solid rgba(245,158,11,0.45);
+            border-radius: 10px; padding: 10px 14px; margin-bottom: 12px;
+            font-size: 13px;
+        }
+        .almost-due-banner .almost-due-icon { color: #d97706; font-size: 15px; }
+        .almost-due-banner .almost-due-clear {
+            margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+            font-size: 12px; font-weight: 600; color: #b45309; text-decoration: none;
+            white-space: nowrap;
+        }
+        .almost-due-banner .almost-due-clear:hover { text-decoration: underline; }
+        .reports-table-section tr.almost-due-highlight td { background: rgba(245,158,11,0.10); }
+        .reports-table-section tr.almost-due-highlight td:first-child { box-shadow: inset 4px 0 0 #f59e0b; }
         @keyframes recentFocusPulse {
             0%, 100% { border-left: 4px solid #3762c8; background: #eef5ff; }
             50%      { border-left: 4px solid #3762c8; background: #dbe9ff; }
@@ -4977,6 +5050,13 @@ if ($is_completed_projects_view || $is_system_admin) {
 
         <!-- Recent Reports Table -->
         <div class="reports-table-section">
+            <?php if ($almost_due_only): ?>
+            <div class="almost-due-banner" role="status">
+                <span class="almost-due-icon"><i class="fas fa-hourglass-end"></i></span>
+                <span class="almost-due-text"><strong>Almost Due Projects (<?php echo (int)$almost_due_total; ?>)</strong> — active road projects with an end date within the next <?php echo (int)rgmap_almost_due_days(); ?> days.</span>
+                <a class="almost-due-clear" href="<?php echo htmlspecialchars($almost_due_clear_url); ?>"><i class="fas fa-times"></i> Show all reports</a>
+            </div>
+            <?php endif; ?>
             <div class="table-header">
                 <h3><span class="title-icon"><i class="fas fa-<?php echo $is_completed_projects_view ? 'circle-check' : 'table-list'; ?>"></i></span> <?php echo $is_completed_projects_view ? 'Completed Projects' : 'Active Monitoring Reports'; ?></h3>
                 <div class="table-header-right">
@@ -5044,7 +5124,7 @@ if ($is_completed_projects_view || $is_system_admin) {
                     </thead>
                     <tbody>
                         <?php if (empty($recent_reports)): ?>
-                        <tr><td colspan="<?php echo $table_colspan; ?>" class="empty-cell"><i class="fas fa-inbox"></i> No reports yet.</td></tr>
+                        <tr><td colspan="<?php echo $table_colspan; ?>" class="empty-cell"><i class="fas fa-inbox"></i> <?php echo $almost_due_only ? 'No almost-due projects.' : 'No reports yet.'; ?></td></tr>
                         <?php else: ?>
                         <?php $source_labels = [
                             'lgu' => 'LGU Monitoring',
@@ -5101,7 +5181,8 @@ if ($is_completed_projects_view || $is_system_admin) {
                         $rr_no_update = !$is_completed_projects_view && !empty($rr['no_update_stale']);
                         $rr_row_class = 'report-table-row'
                             . ($rr_await_transparency ? ' transparency-flagged' : '')
-                            . ($rr_no_update ? ' no-update-flagged' : ''); ?>
+                            . ($rr_no_update ? ' no-update-flagged' : '')
+                            . ($almost_due_only ? ' almost-due-highlight' : ''); ?>
                          <tr class="<?php echo $rr_row_class; ?>" data-id="<?php echo $rr['id']; ?>" data-title="<?php echo htmlspecialchars(strtolower($rr['title'] ?? '')); ?>" data-report-id="<?php echo htmlspecialchars(strtolower($rr['report_id'] ?? '')); ?>" data-status="<?php echo $rr['status'] ?? 'pending'; ?>" data-source="<?php echo $rr_source_key; ?>" data-details='<?php echo $rr_details_json; ?>'>
                             <td class="mono-id"><?php if ($rr_no_update): ?><span class="no-update-flag" title="No progress update for 10 days or more" role="img" aria-label="No progress update for 10 days or more"><i class="fas fa-clock"></i></span><?php endif; ?><?php if ($rr_await_transparency): ?><span class="transparency-await-icon" title="Awaiting your Transparency Upload decision" role="img" aria-label="Awaiting Transparency Upload decision"><i class="fas fa-bullhorn"></i></span><?php endif; ?><?php echo htmlspecialchars($rr['report_id'] ?? '—'); ?></td>
                             <td><?php echo htmlspecialchars($rr['title'] ?? 'Untitled'); ?></td>
@@ -5200,6 +5281,7 @@ if ($is_completed_projects_view || $is_system_admin) {
         const IS_SYSTEM_ADMIN = <?php echo $is_system_admin ? 'true' : 'false'; ?>;
         const IS_COMPLETED_PROJECTS_VIEW = <?php echo $is_completed_projects_view ? 'true' : 'false'; ?>;
         const YOUR_REPORTS_ONLY = <?php echo !empty($your_reports_only) ? 'true' : 'false'; ?>;
+        const ALMOST_DUE_ONLY = <?php echo !empty($almost_due_only) ? 'true' : 'false'; ?>;
         const HIDE_STATUS_COLUMN = <?php echo $hide_status_column ? 'true' : 'false'; ?>;
         const SHOW_CATEGORY_COLUMN = <?php echo $show_category_column ? 'true' : 'false'; ?>;
         const SHOW_PUBLIC_COLUMN = <?php echo $show_public_column ? 'true' : 'false'; ?>;
@@ -5280,6 +5362,9 @@ if ($is_completed_projects_view || $is_system_admin) {
             }
             if (typeof YOUR_REPORTS_ONLY !== 'undefined' && YOUR_REPORTS_ONLY) {
                 url += '&mine=1';
+            }
+            if (typeof ALMOST_DUE_ONLY !== 'undefined' && ALMOST_DUE_ONLY) {
+                url += '&almost_due=1';
             }
             return url;
         }
@@ -5841,6 +5926,7 @@ if ($is_completed_projects_view || $is_system_admin) {
             const url = new URL(window.location);
             url.searchParams.delete('status');
             url.searchParams.delete('mine');
+            url.searchParams.delete('almost_due');
             window.location.href = url.toString();
         }
 
@@ -10135,7 +10221,8 @@ if ($is_completed_projects_view || $is_system_admin) {
         const tr = document.createElement('tr');
         tr.className = 'report-table-row'
             + (isAwaitingTransparency(report) ? ' transparency-flagged' : '')
-            + (isNoUpdateStale(report) ? ' no-update-flagged' : '');
+            + (isNoUpdateStale(report) ? ' no-update-flagged' : '')
+            + ((typeof ALMOST_DUE_ONLY !== 'undefined' && ALMOST_DUE_ONLY) ? ' almost-due-highlight' : '');
         tr.dataset.id = report.id;
         tr.dataset.title = (report.title || '').toLowerCase();
         tr.dataset.reportId = (report.report_id || '').toLowerCase();

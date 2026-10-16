@@ -1499,6 +1499,27 @@ function get_active_assignment_keys($conn) {
     return $keys;
 }
 
+/**
+ * Almost-due window (days) for road-project end dates. Shared by
+ * admin_dashboard.php (count) and road_transportation_monitoring.php
+ * (filter + highlight) so both sides always agree.
+ */
+function rgmap_almost_due_days(): int {
+    return 14;
+}
+
+/**
+ * SQL fragment matching active road_transportation_reports rows whose
+ * due_date falls inside the almost-due window: end date set, not overdue,
+ * and (with the caller's status scope) not completed/cancelled/archived.
+ * Live table rows are non-archived by definition.
+ */
+function rgmap_almost_due_where(string $table_alias = ''): string {
+    $col = ($table_alias !== '' ? $table_alias . '.' : '') . 'due_date';
+    $days = rgmap_almost_due_days();
+    return "({$col} IS NOT NULL AND {$col} >= CURDATE() AND {$col} <= DATE_ADD(CURDATE(), INTERVAL {$days} DAY))";
+}
+
 // Keep only reports that have an active assigned monitoring officer.
 // Same '_ as filter_reports_assigned_to_user() ('_source_table' + 'id').
 function filter_reports_with_active_assignment($conn, array $reports) {

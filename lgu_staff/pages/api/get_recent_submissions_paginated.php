@@ -61,8 +61,12 @@ if ($completed_only) {
     $status_filter = 'completed';
 }
 
+// Almost-due mode (?almost_due=1 from the admin dashboard): same shared
+// end-date criterion the monitoring page and dashboard count use.
+$almost_due_only = (($_GET['almost_due'] ?? '') === '1') && empty($completed_only);
+
 // Helper function to get recent submissions with pagination
-function getRecentSubmissionsPaginated($offset, $limit, $status_filter = 'all', $type_filter = 'all', $transport_only = false, $road_only = false, $assigned_to_user_id = null, $completed_only = false, $skip_active_assignment_filter = false) {
+function getRecentSubmissionsPaginated($offset, $limit, $status_filter = 'all', $type_filter = 'all', $transport_only = false, $road_only = false, $assigned_to_user_id = null, $completed_only = false, $skip_active_assignment_filter = false, $almost_due_only = false) {
     global $conn;
     $reports = [];
     if (!$conn) return $reports;
@@ -91,6 +95,15 @@ function getRecentSubmissionsPaginated($offset, $limit, $status_filter = 'all', 
     $ipms_status_sql = $completed_only
         ? rgmap_ipms_completed_only_where_sql()
         : "status IN ('approved', 'in-progress')";
+
+    // Almost-due mode: only transport rows whose end date falls in the
+    // shared window can match (CIMM/IPMS merges are skipped below), and the
+    // unassigned-hide is bypassed so every counted project stays reachable.
+    $almost_due_only = !empty($almost_due_only) && !$completed_only;
+    $almost_due_sql = $almost_due_only ? ' AND ' . rgmap_almost_due_where('t') : '';
+    if ($almost_due_only) {
+        $skip_active_assignment_filter = true;
+    }
 
     // Helper to append shared WHERE clauses and run a query (no pagination at query level)
     $fetch = function ($sql, $status_filter) use ($conn, $completed_only) {
@@ -133,14 +146,15 @@ function getRecentSubmissionsPaginated($offset, $limit, $status_filter = 'all', 
              WHERE {$transport_status_sql}
                AND (t.created_by IS NULL OR t.created_by = 0
                     OR t.cimm_sync_status IS NULL OR t.cimm_sync_status <> 'pushed'
-                    OR (t.report_category IN ('transportation', 'road') AND t.report_source = 'local' AND t.created_by != 0)){$transport_category_filter}{$road_category_filter}",
+                     OR (t.report_category IN ('transportation', 'road') AND t.report_source = 'local' AND t.created_by != 0)){$transport_category_filter}{$road_category_filter}{$almost_due_sql}",
             $status_filter
         ));
 
         // 2. Infrastructure Projects (ipms_road_projects).
         //    Active Monitoring: locally approved. Completed Projects: status = completed.
         //    Excluded for Transportation Operations Supervisors.
-        if (!$transport_only) {
+        //    Skipped in almost-due mode (no due_date to match on).
+        if (!$transport_only && !$almost_due_only) {
             $reports = array_merge($reports, $fetch(
             "SELECT project_id AS id,
                     CAST(project_id AS CHAR) AS report_id,
@@ -176,7 +190,8 @@ function getRecentSubmissionsPaginated($offset, $limit, $status_filter = 'all', 
         //    outer SELECT * wrapper turns the mapped value into a real
         //    column so the status_filter appended by fetch() (AND status
         //    = ?) can still match on it.
-        if (!$transport_only) {
+        //    Skipped in almost-due mode (no due_date to match on).
+        if (!$transport_only && !$almost_due_only) {
             try {
                 $reports = array_merge($reports, $fetch(
                     "SELECT * FROM (
@@ -259,7 +274,8 @@ try {
         $road_only,
         $assigned_to_user_id,
         $completed_only,
-        $road_supervisor_your_reports
+        $road_supervisor_your_reports,
+        $almost_due_only
     );
 
     // Display-only Assignment Status (Assigned / Unassigned) for each report,
